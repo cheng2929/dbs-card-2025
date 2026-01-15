@@ -34,12 +34,7 @@ EXCLUDE_KEYWORDS = [
 
 # --- 核心邏輯：解析 PDF ---
 def parse_pdf_dbs(file, password):
-    """
-    嘗試解析星展 PDF 帳單。
-    注意：PDF 排版若改版可能會失效，需依據實際文字調整 Regex。
-    """
     transactions = []
-    
     try:
         with pdfplumber.open(file, password=password) as pdf:
             full_text = ""
@@ -48,29 +43,18 @@ def parse_pdf_dbs(file, password):
                 if text:
                     full_text += text + "\n"
             
-            # --- 解析策略 ---
-            # 星展帳單常見格式一行： 2024/01/01  2024/01/03  LINE Pay - 7-11  1,234
-            # 我們尋找： (日期) (任意文字) (金額數字) 的模式
-            # Regex 尋找類似: YYYY/MM/DD ... NT$ 1,234 或 1,234
-            
             lines = full_text.split('\n')
             for line in lines:
-                # 排除明顯的頁首頁尾
                 if "本期應繳" in line or "信用額度" in line or "DBS" in line:
                     continue
 
-                # 簡單的正則表達式：抓取行尾是數字，行首有日期的行
-                # 模式： (日期 YYYY/MM/DD) ... (說明) ... (金額)
+                # 抓取規則：日期 + 說明 + 金額
                 match = re.search(r'(\d{4}/\d{2}/\d{2})\s+(.+?)\s+([0-9,]+)(?:\s|$)', line)
                 
                 if match:
                     date_str = match.group(1)
                     desc_str = match.group(2)
                     amt_str = match.group(3)
-                    
-                    # 清理說明欄位 (去掉入帳日等雜訊)
-                    # 假設說明欄位混雜了入帳日，通常說明文字比較長
-                    # 這裡做簡單處理：直接用 regex 抓到的中間段落
                     
                     try:
                         amt = float(amt_str.replace(",", ""))
@@ -81,7 +65,6 @@ def parse_pdf_dbs(file, password):
                         })
                     except:
                         continue
-                        
         return pd.DataFrame(transactions)
 
     except Exception as e:
@@ -152,7 +135,7 @@ def calculate_points(df, col_name, col_amt, is_foreign_default):
 with st.sidebar:
     st.header("⚙️ 設定")
     is_foreign_default = st.checkbox("預設全為國外消費", False)
-    st.info("PDF 密碼通常為您的身分證字號")
+    st.info("💡 密碼提示：身分證後4碼 + 生日後4碼 (例如: 12340101)")
 
 # --- 主畫面 ---
 file_type = st.radio("選擇上傳檔案類型", ["PDF 帳單", "CSV / Excel"], horizontal=True)
@@ -162,13 +145,15 @@ df = None
 
 if uploaded_file:
     if file_type == "PDF 帳單":
-        password = st.text_input("🔒 請輸入 PDF 密碼 (身分證字號)", type="password")
+        # === 這裡修正了提示文字 ===
+        password = st.text_input("🔒 請輸入 PDF 密碼 (身分證後4碼 + 生日後4碼)", type="password")
+        
         if password:
             with st.spinner("正在破解 PDF 封印並讀取資料..."):
                 result = parse_pdf_dbs(uploaded_file, password)
-                if isinstance(result, str): # Error message
+                if isinstance(result, str): 
                     st.error(f"讀取失敗：{result}")
-                    st.warning("請確認密碼正確，或改用 CSV 上傳。")
+                    st.warning("請確認密碼正確 (身分證後4碼+生日後4碼)，或改用 CSV 上傳。")
                 elif result.empty:
                     st.warning("⚠️ 讀取成功但找不到交易紀錄。可能是 PDF 排版無法識別，建議使用 CSV。")
                 else:
