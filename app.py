@@ -4,11 +4,11 @@ import pdfplumber
 import re
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="星展傳說對決回饋計算機 (多卡版)", page_icon="💳", layout="wide")
+st.set_page_config(page_title="星展傳說對決回饋計算機 (PDF版)", page_icon="💳", layout="wide")
 
 st.title("💳 星展傳說對決聯名卡 (2025版) 回饋試算")
 st.markdown("""
-支援 **多卡過濾**、**PDF 帳單** 與 **CSV/Excel** 匯入。
+支援 **PDF 帳單 (含密碼)** 與 **CSV/Excel** 匯入。
 - **指定通路**：10% (上限 1000 點)
 - **一般消費**：1.2% (無上限)
 """)
@@ -32,20 +32,9 @@ EXCLUDE_KEYWORDS = [
     "繳稅", "燃料費", "中華電信", "台電", "自來水", "全聯", "悠遊卡", "一卡通"
 ]
 
-# --- 側邊欄：設定 ---
-with st.sidebar:
-    st.header("⚙️ 設定")
-    # 新增：卡號過濾功能
-    target_card_last4 = st.text_input("💳 指定卡號末四碼 (若有多張卡請填寫)", max_chars=4, help="只計算這張卡的消費，留空則計算全部")
-    st.divider()
-    is_foreign_default = st.checkbox("預設全為國外消費", False)
-    st.info("💡 密碼提示：身分證後4碼 + 生日後4碼")
-
-# --- 核心邏輯：解析 PDF (含卡號分流) ---
-def parse_pdf_dbs(file, password, target_last4):
+# --- 核心邏輯：解析 PDF ---
+def parse_pdf_dbs(file, password):
     transactions = []
-    current_card_section = None # 追蹤目前讀取到的卡號區段
-    
     try:
         with pdfplumber.open(file, password=password) as pdf:
             full_text = ""
@@ -56,45 +45,33 @@ def parse_pdf_dbs(file, password, target_last4):
             
             lines = full_text.split('\n')
             for line in lines:
-                # 0. 偵測卡號區段 (如果帳單有分卡列示)
-                # 尋找類似 "卡號：xxxx-xxxx-xxxx-1234" 或 "**** **** **** 1234"
-                card_header_match = re.search(r'(?:卡號|Card No|正卡|附卡).*?(\d{4})$', line.strip())
-                if not card_header_match:
-                     # 嘗試找單純的卡號格式 **** **** **** 1234
-                     card_header_match = re.search(r'(?:\d{4}|\*{4}).{1,3}(?:\d{4}|\*{4}).{1,3}(?:\d{4}|\*{4}).{1,3}(\d{4})', line)
-                
-                if card_header_match:
-                    current_card_section = card_header_match.group(1)
-                    # print(f"切換至卡號區段: {current_card_section}") # Debug用
-
-                # 1. 基礎排除
+                # 1. 基礎關鍵字排除 (排除表頭、頁尾)
                 if any(x in line for x in ["本期應繳", "信用額度", "DBS", "繳款截止日", "帳單結帳日", "循環信用", "預借現金額度"]):
                     continue
-                if len(re.findall(r'\d{4}/\d{2}/\d{2}', line)) > 1: # 單行多日期排除
+
+                # 2. 進階排除：如果一行出現兩個以上的日期 (通常是摘要列：結帳日+截止日)
+                dates_in_line = re.findall(r'\d{4}/\d{2}/\d{2}', line)
+                if len(dates_in_line) > 1:
                     continue
 
-                # 2. 交易抓取
+                # 抓取規則：日期 + 說明 + 金額
                 match = re.search(r'(\d{4}/\d{2}/\d{2})\s+(.+?)\s+([0-9,]+)(?:\s|$)', line)
+                
                 if match:
-                    # 如果使用者有指定卡號，且目前已偵測到卡號區段，則進行過濾
-                    # 若 PDF 沒偵測到區段(current_card_section is None)，為避免漏抓，預設都收(或建議用CSV)
-                    if target_last4 and current_card_section:
-                        if current_card_section != target_last4:
-                            continue # 跳過這筆，因為不是目標卡片
-
                     date_str = match.group(1)
                     desc_str = match.group(2).strip()
                     amt_str = match.group(3)
                     
-                    if re.match(r'\d{4}/\d{2}/\d{2}', desc_str): continue # 防呆
+                    # 3. 防呆排除：如果抓到的「商店名稱」其實是日期 (例如抓錯位)
+                    if re.match(r'\d{4}/\d{2}/\d{2}', desc_str):
+                        continue
 
                     try:
                         amt = float(amt_str.replace(",", ""))
                         transactions.append({
                             "交易日期": date_str,
                             "商店名稱": desc_str,
-                            "金額": amt,
-                            "歸屬卡號": current_card_section if current_card_section else "未偵測"
+                            "金額": amt
                         })
                     except:
                         continue
@@ -164,6 +141,12 @@ def calculate_points(df, col_name, col_amt, is_foreign_default):
         
     return pd.DataFrame(results), accumulated_special_points
 
+# --- 側邊欄 ---
+with st.sidebar:
+    st.header("⚙️ 設定")
+    is_foreign_default = st.checkbox("預設全為國外消費", False)
+    st.info("💡 密碼提示：身分證後4碼 + 生日後4碼")
+
 # --- 主畫面 ---
 file_type = st.radio("選擇上傳檔案類型", ["PDF 帳單", "CSV / Excel"], horizontal=True)
 uploaded_file = st.file_uploader("上傳檔案", type=["pdf", "csv", "xlsx"])
@@ -171,53 +154,40 @@ uploaded_file = st.file_uploader("上傳檔案", type=["pdf", "csv", "xlsx"])
 df = None
 
 if uploaded_file:
-    # PDF 模式
     if file_type == "PDF 帳單":
         password = st.text_input("🔒 請輸入 PDF 密碼 (身分證後4碼 + 生日後4碼)", type="password")
         
         if password:
-            with st.spinner("正在讀取並過濾卡號..."):
-                result = parse_pdf_dbs(uploaded_file, password, target_card_last4)
+            with st.spinner("正在破解 PDF 封印並讀取資料..."):
+                result = parse_pdf_dbs(uploaded_file, password)
                 if isinstance(result, str): 
                     st.error(f"讀取失敗：{result}")
+                    st.warning("請確認密碼正確，或改用 CSV 上傳。")
                 elif result.empty:
-                    st.warning("找不到交易紀錄。若有指定卡號，請確認末四碼是否正確。")
+                    st.warning("⚠️ 讀取成功但找不到交易紀錄。可能是 PDF 排版無法識別，建議使用 CSV。")
                 else:
                     df = result
-                    st.success(f"讀取成功！共 {len(df)} 筆資料")
-                    if target_card_last4:
-                        st.caption(f"已過濾卡號末四碼：**{target_card_last4}**")
+                    st.success(f"成功讀取 {len(df)} 筆交易！")
                     col_name, col_amt = "商店名稱", "金額"
+        else:
+            st.info("請輸入密碼以解鎖 PDF")
 
-    # CSV 模式
-    else: 
+    else: # CSV/Excel
         try:
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)
             else:
                 df = pd.read_excel(uploaded_file)
-            
-            st.write("### 1️⃣ 欄位對應")
+            st.write("預覽資料 (前5筆):", df.head())
             cols = df.columns.tolist()
-            c1, c2, c3 = st.columns(3)
-            col_name = c1.selectbox("商店名稱", cols, index=0)
-            col_amt = c2.selectbox("金額", cols, index=1 if len(cols)>1 else 0)
-            
-            # CSV 卡號過濾邏輯
-            if target_card_last4:
-                col_card = c3.selectbox("卡號欄位 (用於過濾)", ["(不使用)"] + cols)
-                if col_card != "(不使用)":
-                    before_len = len(df)
-                    # 轉字串並過濾
-                    df = df[df[col_card].astype(str).str.contains(target_card_last4, na=False)]
-                    after_len = len(df)
-                    st.info(f"已依據卡號 `{target_card_last4}` 過濾： {before_len} 筆 ➔ {after_len} 筆")
-            
+            c1, c2 = st.columns(2)
+            col_name = c1.selectbox("商店名稱欄位", cols, index=0)
+            col_amt = c2.selectbox("金額欄位", cols, index=1 if len(cols)>1 else 0)
         except Exception as e:
             st.error(f"檔案格式錯誤: {e}")
 
-    # --- 計算結果 ---
-    if df is not None and not df.empty:
+    # --- 顯示計算結果 ---
+    if df is not None:
         if st.button("🚀 開始計算回饋"):
             result_df, used_cap = calculate_points(df, col_name, col_amt, is_foreign_default)
             
